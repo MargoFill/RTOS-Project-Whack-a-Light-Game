@@ -1,0 +1,52 @@
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+
+// --- Назначение пинов I2C для ESP32-S3 ---
+#define SDA_PIN 12  // Пин SDA (данные)
+#define SCL_PIN 13  // Пин SCL (тактирование)
+
+// Конструктор аппаратного I2C (Hardware I2C)
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+void setup(void) {
+  // Инициализация аппаратной шины I2C на ESP32-S3 с вашими пинами
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  // Инициализация дисплея
+  u8g2.begin();
+  u8g2.setFontPosTop();
+}
+
+void draw(int a) {
+  switch(a) {
+    case 0: 
+      u8g2.setFont(u8g2_font_bubble_tr);
+      u8g2.drawStr(0, 0, "DFR123");
+      u8g2.setFont(u8g2_font_lucasarts_scumm_subtitle_o_tf);
+      u8g2.drawStr(0, 25, "DFR123");  
+      u8g2.setFont(u8g2_font_HelvetiPixelOutline_tr);
+      u8g2.drawStr(0, 45, "DFR123"); 
+      break;            
+    case 1: 
+      u8g2.setFont(u8g2_font_tenstamps_mr);
+      u8g2.drawStr(0, 0, "DFR123");  
+      u8g2.setFont(u8g2_font_jinxedwizards_tr);
+      u8g2.drawStr(56, 16, "DFR123");  
+      u8g2.setFont(u8g2_font_secretaryhand_tr);
+      u8g2.drawStr(0, 32, "DFR123"); 
+      u8g2.setFont(u8g2_font_freedoomr10_mu);
+      u8g2.drawStr(56, 48, "DFR123"); 
+      break;                     
+  }
+}
+
+void loop(void) {
+  for (int i = 0; i < 2; i++) {
+    u8g2.firstPage();   
+    do {
+      draw(i);
+    } while (u8g2.nextPage());
+    delay(2000);
+  }
+}
