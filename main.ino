@@ -7,9 +7,9 @@
 #define NUM_ELEMENTS 5
 
 // Пины светодиодов (Красный, Синий, Зеленый, Желтый, Белый)
-const uint8_t ledPins[NUM_ELEMENTS]    = {1, 2, 4, 5, 6};
+const uint8_t ledPins[NUM_ELEMENTS]    = { 4, 5, 6, 7, 15};
 // Пины кнопок, соответствующие светодиодам по индексу
-const uint8_t buttonPins[NUM_ELEMENTS] = {7, 15, 16, 17, 18};
+const uint8_t buttonPins[NUM_ELEMENTS] = {16, 17, 18, 8, 3};
 
 // Структура для передачи событий кнопок
 typedef struct {
