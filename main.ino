@@ -4,43 +4,40 @@
   #include "freertos/queue.h"
   #include "freertos/semphr.h"
 
-  #include <SPI.h>
-  #include <Adafruit_GFX.h>
-  #include <Adafruit_SSD1306.h>
+  #include <U8g2lib.h>
+  #include <Wire.h>
 
   #define NUM_ELEMENTS 5
 
-  // --- Пины OLED (SPI) ---
-  #define OLED_W     128
-  #define OLED_H     64
-  #define OLED_MOSI  12   // SDA
-  #define OLED_CLK   13   // SCL
-  #define OLED_DC    11   // D/C
-  #define OLED_CS    10   // CS
-  #define OLED_RESET -1   // нет пина RES
+  // === РАСПИНОВКА OLED (I2C) ===
+  #define SDA_PIN 12
+  #define SCL_PIN 13
 
-  // Программный SPI: (ширина, высота, MOSI, CLK, DC, RESET, CS)
-  Adafruit_SSD1306 display(OLED_W, OLED_H, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+  // Конструктор аппаратного I2C, полный буфер (F)
+  U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
-  // Пины светодиодов (Красный, Синий, Зеленый, Желтый, Белый)
+  // === РАСПИНОВКА ИГРЫ ===
   const uint8_t ledPins[NUM_ELEMENTS]    = { 4, 5, 6, 7, 15};
-  // Пины кнопок, соответствующие светодиодам по индексу
   const uint8_t buttonPins[NUM_ELEMENTS] = {16, 17, 18, 8, 9};
 
-  // Структура для передачи событий кнопок
+  // === УСЛОВИЯ КОНЦА ИГРЫ ===
+  const int MAX_MISS  = 5;  // пропустить МОЖНО 5 раз; на 6-м конец
+  const int MAX_LIVES = 5;  // 5 неправильных нажатий — конец
+
   typedef struct {
-      int buttonIndex; // Индекс нажатой кнопки (0..4)
+      int buttonIndex;
   } ButtonEvent_t;
 
-  // Объекты FreeRTOS
   QueueHandle_t xButtonQueue = NULL;
   SemaphoreHandle_t xSerialMutex = NULL;
 
-  // Глобальные переменные состояния игры
   int score = 0;
-  int currentTimeoutMs = 1500; // Начальный лимит времени на реакцию (1.5 сек)
+  int currentTimeoutMs = 1500;
+  volatile int  missCount  = 0;
+  volatile int  wrongCount = 0;
+  volatile bool startGame  = false;
+  volatile bool gameOver   = false;
 
-  // --- Вспомогательная функция безопасного логгирования (Mutex) ---
   void safeLog(const char* msg) {
       if (xSemaphoreTake(xSerialMutex, portMAX_DELAY) == pdTRUE) {
           Serial.println(msg);
@@ -48,7 +45,7 @@
       }
   }
 
-  // --- Задача 1: Опрос кнопок (High Priority = 3) ---
+  // === ЗАДАЧА 1: Опрос кнопок (Priority 3) ===
   void TaskButtons(void *pvParameters) {
       bool lastState[NUM_ELEMENTS];
       for (int i = 0; i < NUM_ELEMENTS; i++) {
@@ -59,152 +56,174 @@
       for (;;) {
           for (int i = 0; i < NUM_ELEMENTS; i++) {
               bool currentState = digitalRead(buttonPins[i]);
-
-              // Фиксация нажатия (переход из HIGH в LOW) с защитой от дребезга
               if (lastState[i] == HIGH && currentState == LOW) {
-                  vTaskDelay(pdMS_TO_TICKS(20)); // Антидребезг 20 мс
+                  vTaskDelay(pdMS_TO_TICKS(20));
                   if (digitalRead(buttonPins[i]) == LOW) {
                       ButtonEvent_t event;
                       event.buttonIndex = i;
-                      // Отправка индекса нажатой кнопки в очередь
                       xQueueSend(xButtonQueue, &event, 0);
                   }
               }
               lastState[i] = currentState;
           }
-          vTaskDelay(pdMS_TO_TICKS(10)); // Частота опроса 100 Гц
+          vTaskDelay(pdMS_TO_TICKS(10));
       }
   }
 
-  // --- Задача 2: Основная логика игры (Medium Priority = 2) ---
+  // === ЗАДАЧА 2: Логика игры (Priority 2) ===
   void TaskGameLogic(void *pvParameters) {
       ButtonEvent_t rxEvent;
 
-      // Пауза перед стартом
-      vTaskDelay(pdMS_TO_TICKS(2000));
+      while (!startGame) {
+          vTaskDelay(pdMS_TO_TICKS(50));
+      }
       safeLog("=== GAME STARTED ===");
 
       for (;;) {
-          // 1. Выбираем случайный LED (0..4)
           int targetIndex = random(0, NUM_ELEMENTS);
-
-          // Включаем целевой LED
           digitalWrite(ledPins[targetIndex], HIGH);
 
           char logBuf[80];
-          snprintf(logBuf, sizeof(logBuf), "\n[ROUND] Light LED #%d (%d ms limit)", targetIndex + 1, currentTimeoutMs);
+          snprintf(logBuf, sizeof(logBuf), "[ROUND] Light LED #%d (%d ms limit)", targetIndex + 1, currentTimeoutMs);
           safeLog(logBuf);
 
-          // Сбрасываем накопленные старые нажатия из очереди перед новым раундом
           xQueueReset(xButtonQueue);
 
-          // 2. Ждем ответа из очереди с ТАЙМАУТОМ
           BaseType_t xStatus = xQueueReceive(xButtonQueue, &rxEvent, pdMS_TO_TICKS(currentTimeoutMs));
-
-          // Гасим LED сразу после ответа или таймаута
           digitalWrite(ledPins[targetIndex], LOW);
 
-          // 3. Обработка результата
           if (xStatus == pdTRUE) {
               if (rxEvent.buttonIndex == targetIndex) {
-                  // УСПЕХ: Нажата правильная кнопка
                   score++;
                   snprintf(logBuf, sizeof(logBuf), "-> SUCCESS! Score: %d", score);
                   safeLog(logBuf);
-
-                  // Усложнение: немного уменьшаем время на реакцию (минимум 400 мс)
-                  if (currentTimeoutMs > 400) {
-                      currentTimeoutMs -= 25;
-                  }
+                  if (currentTimeoutMs > 400) currentTimeoutMs -= 25;
               } else {
-                  // ОШИБКА: Нажата не та кнопка
-                  snprintf(logBuf, sizeof(logBuf), "-> WRONG BUTTON! Pressed #%d. Score: %d", rxEvent.buttonIndex + 1, score);
+                  wrongCount++;
+                  snprintf(logBuf, sizeof(logBuf), "-> WRONG BUTTON! Pressed #%d. Lives left: %d. Score: %d",
+                           rxEvent.buttonIndex + 1, MAX_LIVES - wrongCount, score);
                   safeLog(logBuf);
               }
           } else {
-              // ТАЙМАУТ: Игрок не успел нажать
-              snprintf(logBuf, sizeof(logBuf), "-> TIMEOUT! You were too slow. Score: %d", score);
+              missCount++;
+              snprintf(logBuf, sizeof(logBuf), "-> TIMEOUT! Misses: %d/%d. Score: %d",
+                       missCount, MAX_MISS, score);
               safeLog(logBuf);
           }
 
-          // Пауза между раундами (1 секунда)
+          // === ПРОВЕРКА КОНЦА ИГРЫ ===
+          if (missCount > MAX_MISS || wrongCount >= MAX_LIVES) {
+              gameOver = true;
+              if (missCount > MAX_MISS)
+                  safeLog("=== GAME OVER: too many misses ===");
+              else
+                  safeLog("=== GAME OVER: out of lives ===");
+
+              for (int i = 0; i < NUM_ELEMENTS; i++) digitalWrite(ledPins[i], LOW);
+              vTaskSuspend(NULL);
+          }
+
           vTaskDelay(pdMS_TO_TICKS(1000));
       }
   }
 
-  // --- Задача 3: Системный монитор / Heartbeat (Low Priority = 1) ---
+  // === ЗАДАЧА 3: Системный монитор (Priority 1) ===
   void TaskSystemMonitor(void *pvParameters) {
       for (;;) {
-          // Фоновый отчёт каждые 10 секунд
           char logBuf[64];
           snprintf(logBuf, sizeof(logBuf), "[SYSTEM] Free Heap: %d bytes", ESP.getFreeHeap());
           safeLog(logBuf);
-
           vTaskDelay(pdMS_TO_TICKS(10000));
       }
   }
 
-  // --- Задача 4: Вывод на OLED (Low Priority = 1) ---
+  // === ЗАДАЧА 4: Вывод на OLED (Priority 1) ===
   void TaskDisplay(void *pvParameters) {
-      // Экран "START"
-      display.clearDisplay();
-      display.setTextColor(SSD1306_WHITE);
-      display.setTextSize(3);
-      display.setCursor(10, 20);
-      display.println("START");
-      display.display();
-      vTaskDelay(pdMS_TO_TICKS(2000)); // держим "START" пока идёт пауза до игры
 
+      // --- Отсчёт 3 - 2 - 1 ---
+      for (int n = 3; n >= 1; n--) {
+          u8g2.clearBuffer();
+          u8g2.setFont(u8g2_font_fub42_tn);   // крупный цифровой шрифт
+          char buf[2]; buf[0] = '0' + n; buf[1] = 0;
+          u8g2.drawStr(50, 55, buf);
+          u8g2.sendBuffer();
+          vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+
+      // --- "GO!" ---
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_fub30_tr);
+      u8g2.drawStr(25, 48, "GO!");
+      u8g2.sendBuffer();
+      vTaskDelay(pdMS_TO_TICKS(1000));
+
+      startGame = true;
+
+      // --- Основной цикл экрана ---
       for (;;) {
-          display.clearDisplay();
+          u8g2.clearBuffer();
 
-          // Надпись SCORE
-          display.setTextSize(2);
-          display.setCursor(0, 5);
-          display.println("SCORE");
+          if (gameOver) {
+              // Экран END + финальный счёт
+              u8g2.setFont(u8g2_font_fub20_tr);
+              u8g2.drawStr(30, 25, "END");
+              char buf[24];
+              snprintf(buf, sizeof(buf), "Score: %d", score);
+              u8g2.setFont(u8g2_font_ncenB10_tr);
+              u8g2.drawStr(10, 55, buf);
+          } else {
+              // Игровой экран: SCORE + число
+              u8g2.setFont(u8g2_font_ncenB10_tr);
+              u8g2.drawStr(0, 15, "SCORE");
+              char buf[12];
+              snprintf(buf, sizeof(buf), "%d", score);
+              u8g2.setFont(u8g2_font_fub30_tn);
+              u8g2.drawStr(0, 62, buf);
+          }
 
-          // Само число — крупно
-          display.setTextSize(4);
-          display.setCursor(0, 30);
-          display.println(score);
-
-          display.display();
-          vTaskDelay(pdMS_TO_TICKS(200)); // обновление 5 раз/сек
+          u8g2.sendBuffer();
+          vTaskDelay(pdMS_TO_TICKS(gameOver ? 500 : 200));
       }
   }
 
   void setup() {
       Serial.begin(115200);
-      randomSeed(esp_random());// Инициализация ГПСЧ
+      delay(2000);  // даём Serial время стартануть
+      Serial.println("\n\n=== SETUP STARTED ===");
 
-      // Инициализация дисплея
-      if (!display.begin(SSD1306_SWITCHCAPVCC)) {
-          Serial.println("SSD1306 init FAILED (проверь пины/подключение)");
-      } else {
-          display.clearDisplay();
-          display.display();
-      }
+      // === Инициализация OLED (I2C) ===
+      Wire.begin(SDA_PIN, SCL_PIN);
+      u8g2.begin();
+      u8g2.setFontPosBottom();
+      Serial.println("OLED (U8g2 I2C) initialized");
 
-      // Инициализация пинов светодиодов
+      // === Инициализация LED ===
       for (int i = 0; i < NUM_ELEMENTS; i++) {
           pinMode(ledPins[i], OUTPUT);
           digitalWrite(ledPins[i], LOW);
       }
+      Serial.println("LED pins configured");
 
-      // Создаем объекты FreeRTOS
+      // === Создание объектов FreeRTOS ===
       xButtonQueue = xQueueCreate(5, sizeof(ButtonEvent_t));
-      xSerialMutex  = xSemaphoreCreateMutex();
+      xSerialMutex = xSemaphoreCreateMutex();
+
+      Serial.printf("Queue: %p, Mutex: %p\n", (void*)xButtonQueue, (void*)xSerialMutex);
 
       if (xButtonQueue != NULL && xSerialMutex != NULL) {
-          // Создание задач с приоритетами 3, 2 и 1
+          Serial.println("Creating FreeRTOS tasks...");
           xTaskCreatePinnedToCore(TaskButtons,       "ButtonsTask",   2048, NULL, 3, NULL, 1);
           xTaskCreatePinnedToCore(TaskGameLogic,     "GameLogicTask", 3072, NULL, 2, NULL, 1);
           xTaskCreatePinnedToCore(TaskSystemMonitor, "MonitorTask",   2048, NULL, 1, NULL, 1);
           xTaskCreatePinnedToCore(TaskDisplay,       "DisplayTask",   4096, NULL, 1, NULL, 1);
+          Serial.println("All tasks created!");
+      } else {
+          Serial.println("ERROR: Queue or Mutex creation failed!");
       }
+
+      Serial.println("=== SETUP COMPLETED ===\n");
   }
 
   void loop() {
-      // Освобождаем процессорное время для фоновых процессов FreeRTOS
       vTaskDelay(pdMS_TO_TICKS(1000));
   }
