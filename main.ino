@@ -1,4 +1,4 @@
-  #include <Arduino.h>
+#include <Arduino.h>
   #include "freertos/FreeRTOS.h"
   #include "freertos/task.h"
   #include "freertos/queue.h"
@@ -188,13 +188,21 @@
 
   void setup() {
       Serial.begin(115200);
-      delay(2000);  // даём Serial время стартануть
+      delay(2000);
       Serial.println("\n\n=== SETUP STARTED ===");
 
       // === Инициализация OLED (I2C) ===
       Wire.begin(SDA_PIN, SCL_PIN);
       u8g2.begin();
       u8g2.setFontPosBottom();
+
+      // КРИТИЧНО: явно стираем старые данные на экране перед новой программой
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_ncenB10_tr);
+      u8g2.drawStr(5, 55, "Initializing...");
+      u8g2.sendBuffer();
+      delay(500);
+
       Serial.println("OLED (U8g2 I2C) initialized");
 
       // === Инициализация LED ===
